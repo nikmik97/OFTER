@@ -1,0 +1,200 @@
+class OFTER:
+    def __init__(self,reduce_dimension=True,feature_transformation=False,delta = 0.9,
+               max_lookback = 700,dynamic_lookback=250,min_lookback=1,
+               minimum_correlation=0.01,Csoriginal=0.1,power=2,
+               pvalue=0.05,residualize = False,
+               metric='MSE',ss = [0.001,0.005,0.01,0.05,0.1,0.5,1,5,10,50,100],
+               kNN = [1,2,3,5,10,15,20,30,50],
+               find_outliers=False,outlier_parameter=5,lookback_outliers=750): 
+        self.pvalue = pvalue
+        self.reduce_dimension = reduce_dimension
+        self.feature_transformation = feature_transformation
+        self.Csoriginal = Csoriginal
+        self.max_lookback = max_lookback
+        self.min_lookback = min_lookback
+        self.dynamic_lookback = dynamic_lookback
+        self.delta = delta
+        self.minimum_correlation = minimum_correlation
+        self.metric = metric
+        self.ss = ss
+        self.kNN = kNN
+        self.power = power
+        self.residualize = residualize
+        
+        if find_outliers: 
+            self.find_outliers = True
+            self.outliers = []
+            self.outlier_distance = []
+            self.outlier_parameter = outlier_parameter
+            self.lookback_outliers = lookback_outliers
+        else:
+            self.find_outliers = False
+     
+
+    @jit
+    def fit_models(self,x,y): 
+        self.lambdas, self.Q = inital_covariance(x)
+        if self.reduce_dimension:
+            self.Ndim = np.max(([i for i in range(len(self.lambdas)) if (np.cumsum(self.lambdas)/np.sum(self.lambdas))[i]>self.delta][0],2))
+            cs_original,as_original,bs_original,train_original,Corrs_original = train_with_transformations(x,y)
+            self.high_cor_inds = np.where(np.abs(Corrs_original)>self.Csoriginal)[0]
+            #print(self.high_cor_inds)
+            self.Xtbu = np.concatenate((self.x_combined.dot(self.Q[:,:self.Ndim]) , 
+                                        self.x_combined[:,self.high_cor_inds].reshape(self.x_combined.shape[0],len(self.high_cor_inds))),axis=1)
+        else:
+            self.Ndim = self.x_combined.shape[1]
+            self.Q = np.identity(self.Ndim)
+            self.high_cor_inds = []
+            self.Xtbu = self.x_combined.copy()  
+            
+        if self.feature_transformation:
+            self.cs,self.ais,self.bis,train_x2,corr_temp = train_with_transformations(self.Xtbu[:x.shape[0],:],y)
+            self.Xtbu = np.array([apply_function(self.Xtbu[:,i],self.cs[i],self.ais[i],self.bis[i]) for i in range(self.Xtbu.shape[1])]).T
+        
+        features_correlations = np.abs(thresholded_correlation(self.Xtbu[:x.shape[0],:],
+                                                    y,minimum_correlation=self.minimum_correlation))**self.power
+        self.weights = features_correlations / np.sum(features_correlations)
+        
+        reg = LinearRegression().fit(self.Xtbu[int(np.max((x.shape[0]-self.max_lookback,0))):(x.shape[0]-self.min_lookback),:],
+                                     self.y_combined[int(np.max((x.shape[0]-self.max_lookback,0))):(x.shape[0]-self.min_lookback)])
+        self.beta,self.beta_0 = [reg.coef_,reg.intercept_]  
+        
+    def train(self,data,train_proportion=.7): 
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore") 
+     
+            if len(data) == 2: 
+                X,y = data
+                if self.residualize: 
+                    signal,residuals,self.order,self.maps = residualise(y,int(np.floor(len(y)*train_proportion)),self.pvalue)
+                    train_x,test_x,train_y,test_y = train_test_split(X,residuals,shuffle=False)
+                else: 
+                    train_x,test_x,train_y,test_y = train_test_split(X,y,shuffle=False)
+            if len(data) == 4: 
+                train_x,train_y,test_x,test_y = data
+                y = np.concatenate([train_y,test_y])
+                if self.residualize: 
+                    signal,residuals,self.order,self.maps = residualise(y,int(np.floor(len(y)*train_proportion)),self.pvalue)
+                    train_y = residuals[:-test_y.shape[0]]
+                    test_y = residuals[-test_y.shape[0]:]
+
+            self.original_data = data
+            self.train_data = [train_x,train_y,test_x,test_y]
+
+            ypreds = np.zeros(test_y.shape[0])
+            train = np.arange(0,train_x.shape[0])
+            test = np.arange(train_x.shape[0],train_x.shape[0]+test_x.shape[0])
+            self.x_combined = np.concatenate((train_x,test_x),axis=0)
+            self.y_combined = np.concatenate((train_y,test_y),axis=0) 
+
+            self.fit_models(train_x,train_y)     
+            eta_len = len(self.ss)+len(self.kNN)+1
+            self.eta = np.ones(eta_len) / eta_len
+            self.R = np.zeros(eta_len)
+            self.historical_errors = np.zeros((0,len(of.eta)))
+
+            if self.find_outliers:
+                D = np.array([(np.abs(of.Xtbu[:train_x.shape[0],:]-
+                            of.Xtbu[i,:])**2 * of.weights).sum(1) for i in range(train_x.shape[0])])
+                D[D == 0] = 10000
+                self.outlier_distance += D.min(0).tolist()
+                print(self.outlier_distance)
+                
+            for j in test:
+                if (j-test[0]) % 100 == 0:
+                    self.fit_models(self.x_combined[:j,:],self.y_combined[:j])
+                
+                ypreds[j-test[0]] = self.forecast_new_point(xnew = self.Xtbu[j,:],ynew = self.y_combined[j],
+                              xhistorical = self.Xtbu[:j,:],yhistorical = self.y_combined[:j])
+
+            if self.residualize:
+                return(ypreds+signal[-ypreds.shape[0]:],y[-ypreds.shape[0]:])
+            else: 
+                return(ypreds,y[-ypreds.shape[0]:])
+            
+    def print_order(self): 
+        self.order = pd.DataFrame(order,index=['p','q','r'])
+        
+    def print_eta(self):
+        ind = np.where(self.eta == np.max(self.eta))[0]
+        ind_names = np.array(['GRNN: ' + str(i) for i in self.ss] + ['kNN: ' + str(i) for i in self.kNN] + ['LR'])
+        print(ind_names[ind])
+        
+    def print_performance(self,preds,observed): 
+        print(metrics(preds,observed))
+            
+    @jit
+    def Reta(self,Yhat,Yt): 
+        Rtemp = 0 
+        
+        if self.metric == "MAE":
+            Rtemp = np.abs(Yhat-Yt) 
+        if self.metric == "MAPE":
+            Rtemp = np.abs((Yhat-Yt) / Yt) 
+        if self.metric == "MSE":
+            Rtemp = (Yhat-Yt)**2
+        if self.metric == "PnL":
+            Rtemp = np.sign(Yhat).dot(Yt)
+
+        self.historical_errors = np.vstack([self.historical_errors,Rtemp])
+        self.R = self.historical_errors[-self.dynamic_lookback:,:].sum(0)
+        eta_tprime = np.zeros(len(Yhat))
+        eta_tprime[np.argmin(self.R)] = 1
+        if self.metric == "PnL":
+            eta_tprime[np.argmax(self.R)] = 1
+        if not all(np.zeros(len(Yhat)) == eta_tprime):
+            self.eta = eta_tprime / np.linalg.norm(eta_tprime,ord=1)
+    
+    @jit
+    def forecast_new_point(self,xnew,ynew,xhistorical=[],yhistorical=[],update=True): 
+        if len(xhistorical) == 0: 
+            xhistorical = self.Xtbu
+            
+            if self.reduce_dimension:
+                xnewtemp = xnew.copy()
+                xnew = np.concatenate((xnew.dot(self.Q[:,:self.Ndim]) , 
+                                    xnew[:,self.high_cor_inds].reshape(xnew.shape[0],len(self.high_cor_inds))),axis=1)
+                xnew = np.concatenate(xnew,xnewtemp[self.high_cor_inds])
+      
+            if self.feature_transformation:
+                xnew = np.array([apply_function(xnew[i],self.cs[i],self.ais[i],self.bis[i]) for i in range(x_combined.shape[1])]).T
+      
+            
+        if len(yhistorical) == 0: 
+            yhistorical = self.y_combined
+            
+        yhistorical = yhistorical[-self.max_lookback:]       
+        xhistorical = xhistorical[-self.max_lookback:,:]
+        return(self.calculate_forecast(xhistorical,yhistorical,xnew,ynew,update=update))
+    
+    def check_outliers(self,d): 
+        current_min = np.min(d)
+        historical_mins = self.outlier_distance[-self.lookback_outliers:]
+        self.outlier_distance.append(current_min)
+        q1 = np.quantile(historical_mins,0.25)
+        q3 = np.quantile(historical_mins,0.75)
+        if current_min > q3 + self.outlier_parameter * (q3-q1):
+            self.outliers.append(len(self.outlier_distance)-1)
+                
+    @jit       
+    def calculate_forecast(self,xhistorical,yhistorical,xnew,ynew,update=True):
+        d = (np.abs(xhistorical-xnew)**2 * self.weights).sum(1)
+        ranks = np.argsort(d)
+        if self.find_outliers: 
+            self.check_outliers(d)
+            
+        Yhat_knn = np.array([np.mean(yhistorical[ranks[:self.kNN[iter]]]) for iter in range(len(self.kNN))])
+        Wt = np.exp(-np.tile(d.reshape(1,d.shape[0]), (len(self.ss),1)).T / np.array(self.ss))
+        inds = np.where(Wt.sum(0) < 1e-06)[0]
+        if len(inds) > 0: 
+            for ii in inds:
+                Wt[:,ii] = 1 / Wt.shape[0]
+        Wt = Wt / Wt.sum(0)
+        Yhat_grnn = Wt.T.dot(yhistorical)
+        Yhat_lr = np.array([self.beta_0 + np.sum(self.beta * xnew)])
+        Yhat = np.concatenate((Yhat_grnn,Yhat_knn,Yhat_lr))
+        preds  = Yhat.T.dot(self.eta)
+        if update == True: 
+            self.Reta(Yhat,ynew)
+            
+        return(preds)
