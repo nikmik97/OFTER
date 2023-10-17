@@ -35,26 +35,3 @@ def standardise(X,start):
             s = np.sqrt((ss / i) - mu**2)
             Xnew[i,:] = (X[i,:] - mu) / s
         return(Xnew)
-
-def metrics(ypreds,yreal): 
-    dm_val = 0.5
-    if (ypreds[1:].std() > 0) * (len(np.unique(ypreds)) > 10): 
-        dm_val = dm_test(yreal[1:], ypreds[1:], ypreds[:-1], one_sided=True)[1]
-        
-    mets = [np.corrcoef((ypreds,yreal))[0,1],
-           np.sqrt(np.mean((ypreds-yreal)**2)),
-           np.mean(np.abs(ypreds-yreal)),
-           np.mean(np.abs((ypreds-yreal)/yreal)),
-           theil_u(ypreds,yreal),dm_val,
-           boot_se_mse(ypreds,yreal)]
-    return(np.array(mets))
-
-def sample(n,prop = 0.5):
-    n_sample = int(np.floor(prop * n))
-    s = np.array(([i for i in range(n)]))
-    random.shuffle(s)
-    return(s[:n_sample])
-
-def boot_se_mse(ypreds,yreal,B=100,prop = 0.5): 
-    sqs = (ypreds - yreal)**2
-    return(np.std([np.sqrt(np.mean(sqs[sample(len(sqs),prop = prop)])) for j in range(B)]))
