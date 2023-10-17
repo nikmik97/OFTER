@@ -1,0 +1,23 @@
+@jit
+def inital_covariance(X,threshold = 1e-05):
+    C0 = np.cov(X.T)
+    C0[np.abs(C0) < threshold] = 0
+    e_vals, e_vecs = np.linalg.eig(C0)
+    
+    e_vecs = np.real(e_vecs)
+    e_vals = np.real(e_vals)
+    
+    idx = e_vals.argsort()[::-1]   
+    e_vals = e_vals[idx]
+    e_vecs = e_vecs[:,idx]
+    
+    return(e_vals,e_vecs)
+
+@jit
+def thresholded_correlation(X,y,minimum_correlation=0.05):
+    Xy = np.concatenate((X,y.reshape(len(y),1)),axis=1)
+    Corrs = spearmanr(Xy)[0][:-1,-1]
+    inds = np.where(np.abs(Corrs) < minimum_correlation)[0]
+    if len(inds) < X.shape[1]: 
+        Corrs[inds] = 0
+    return(Corrs.flatten())
