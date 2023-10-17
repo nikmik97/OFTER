@@ -1,0 +1,133 @@
+import numpy as np
+import pandas as pd
+from keras.models import Sequential
+from keras.layers import Dense
+from sklearn.metrics import mean_squared_error
+from sklearn import preprocessing
+from numpy import linalg
+from sklearn.model_selection import train_test_split
+from keras.layers import  Dense, Embedding, LSTM, Bidirectional, GRU
+import xgboost as xgb
+from keras.layers import Dropout
+from tensorflow import keras
+from tensorflow.keras import layers
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import RepeatedKFold
+from  sklearn.decomposition import PCA
+from sklearn import linear_model
+from sklearn.linear_model import LinearRegression
+from sklearn import svm
+from sklearn.ensemble import RandomForestRegressor
+
+def rf_model(train_x,train_y,test_x,test_y,n=200):
+    rf = RandomForestRegressor(n_estimators = n, random_state = 42)
+    rf.fit(train_x,train_y)
+    return(rf.predict(test_x))
+
+def svm_model(train_x,train_y,test_x,test_y):
+    svm_mod = svm.SVR()
+    svm_mod.fit(train_x, train_y)
+    return(svm_mod.predict(test_x))
+
+def lm_model(train_x,train_y,test_x,test_y):
+    reg = LinearRegression().fit(train_x, train_y)
+    return(reg.predict(test_x))
+
+def lpca_model(train_x,train_y,test_x,test_y,delta=0.9):
+    C = np.cov(train_x.transpose(1,0))
+    eigvals,eigvecs = np.linalg.eig(C)
+    cumsums = np.cumsum(eigvals) / np.sum(eigvals)
+    cutoff = np.where(cumsums >= 0.9)[0][0] + 1
+    fitted = train_x.dot(eigvecs[:,:cutoff])
+    reg = LinearRegression().fit(np.real(fitted), train_y)
+    return(reg.predict(np.real(test_x.dot(eigvecs[:,:cutoff]))))
+
+def lasso_model(train_x,train_y,test_x,test_y):
+    cv = RepeatedKFold(n_splits=10, n_repeats=1, random_state=1)
+    alphas = np.array([0.001,0.005,0.01,0.05,0.1,0.5,1])
+    Ks = 10
+    scores = np.zeros((alphas.shape[0],Ks))
+    for i in range(len(alphas)):
+        clf = linear_model.Lasso(alpha=alphas[i])
+        cv = RepeatedKFold(n_splits=10, n_repeats=1, random_state=1)
+        scores[i,:] = cross_val_score(clf, train_x, train_y, scoring='neg_mean_absolute_error', cv=cv, n_jobs=-1)
+    
+    colmeans = scores.mean(axis=1)
+    alpha_chosen = alphas[np.where(colmeans==max(colmeans))[0][0]]
+    clf = linear_model.Lasso(alpha=alpha_chosen)
+    clf.fit(train_x,train_y)
+    return(clf.predict(test_x))
+
+def create_dataset(dataset, y_ind,look_back=1):
+    dataX, dataY = [], []
+    for i in range(len(dataset)-look_back-1):
+        a = dataset[i:(i+look_back), :]
+        dataX.append(a)
+        dataY.append(dataset[i + look_back, y_ind])
+    return np.array(dataX), np.array(dataY)
+
+def data_for_nn(feats,y_ind,look_back=3):
+    X,y = create_dataset(feats,y_ind=y_ind,look_back=look_back)
+    X = X.astype('float32')
+    y = y.astype('float32')
+    
+    train_lim = int(np.floor(X.shape[0]*0.7))
+    train_x_nn = X[:train_lim,:,:]
+    test_x_nn = X[train_lim:,:,:]
+    train_y_nn = y[:train_lim]
+    test_y_nn = y[train_lim:]
+
+    return(train_x_nn,train_y_nn,test_x_nn,test_y_nn)
+    
+
+def lstm_model(train_x,train_y,test_x,test_y,look_back=1,epochs=10):
+    output_units = 1
+    model = Sequential()
+    model.add(LSTM(units = 10, return_sequences = True, input_shape = (look_back,train_x.shape[2])))
+    model.add(LSTM(units = 10, return_sequences = False))
+    model.add(Dense(units = output_units))
+    opt = keras.optimizers.Adam(learning_rate=0.0001)
+    model.compile(optimizer = opt, loss = 'mean_squared_error')
+    model.fit(train_x, train_y, epochs=epochs, batch_size=1000, verbose=0)
+    lstm_preds = model.predict(test_x)
+    return(lstm_preds[:,0])
+
+def bilstm_model(train_x,train_y,test_x,test_y,look_back=1,epochs=10):
+    model = Sequential()
+    model.add(Bidirectional(LSTM(10,return_sequences = True, input_shape = (look_back,train_x.shape[2]))))
+    model.add(Bidirectional(LSTM(10)))
+    model.add(Dense(1, activation='sigmoid'))
+    opt = keras.optimizers.Adam(learning_rate=0.0001)
+    model.compile(optimizer = opt, loss = 'mean_squared_error')
+    model.fit(train_x, train_y, epochs=epochs, batch_size=1000, verbose=0)
+    bi_lstm_preds = model.predict(test_x)
+    return(bi_lstm_preds[:,0])
+
+def gru_model(train_x,train_y,test_x,test_y,look_back=1,epochs=10):
+    output_units = 1
+    model = Sequential()
+    model.add(GRU(units = 20, return_sequences = True, input_shape = (look_back,train_x.shape[2])))
+    model.add(GRU(units = 20))
+    model.add(Dense(units = output_units))
+    opt = keras.optimizers.Adam(learning_rate=0.0001)
+    model.compile(optimizer = opt, loss = 'mean_squared_error')
+    model.fit(train_x, train_y, epochs=epochs, batch_size=300, verbose=0)
+    gru_preds = model.predict(test_x)
+    return(gru_preds[:,0])
+
+def XGBoost_model(train_x,train_y,test_x,test_y,n=100):
+    train_x_xgb, test_x_xgb, train_y_xgb, test_y_xgb = train_test_split(
+    train_x,train_y.reshape(train_y.shape[0],1),shuffle=False)    
+    params = {"objective": "reg:squarederror", "tree_method": "hist","verbose":0}
+    dtrain_reg = xgb.DMatrix(train_x_xgb,train_y_xgb,enable_categorical=True)
+    dtest_reg = xgb.DMatrix(test_x_xgb,test_y_xgb,enable_categorical=True)
+    dtest = xgb.DMatrix(test_x,test_y.reshape(test_y.shape[0],1),enable_categorical=True)
+    evals = [(dtrain_reg, "train"), (dtest_reg, "validation")]
+    model = xgb.train(
+       params=params,
+       dtrain=dtrain_reg,
+       num_boost_round=n,
+       evals=evals,
+       verbose_eval=0
+    )
+    return(model.predict(dtest)) 
