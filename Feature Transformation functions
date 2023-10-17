@@ -1,0 +1,73 @@
+import numpy as np
+import math
+from math import comb
+import pandas as pd
+from numpy import linalg
+from scipy.stats import spearmanr
+import warnings
+from numba import jit,njit
+from sklearn.linear_model import LinearRegression
+
+@jit
+def train_with_transformations(train_x,train_y):
+    train_x2 = train_x.copy()
+    cs = []
+    ais = []
+    bis = []
+    for i in range(train_x.shape[1]):
+        c,a,b = optimal_transformation(train_x[:,i],train_y)
+        cs.append(c)
+        ais.append(a)
+        bis.append(b)    
+        train_x2[:,i] = apply_function(train_x[:,i],c,a,b)
+    Xy = np.vstack((train_x2.T,train_y.reshape(1,len(train_y)))).T
+    Corrs = spearmanr(Xy)[0][:(Xy.shape[1]-1),(Xy.shape[1]-1):] 
+    return(cs,ais,bis,train_x2,[Corrs[k][0] for k in range(len(Corrs))])
+
+
+@jit
+def apply_function(x_initial,c,a,b):
+    K = len(c)
+    N = len(x_initial)
+    Phi = np.zeros((N,K))
+    x = (x_initial - a) / (b-a)
+    x[x < 0] = 0
+    x[x > 1] = 1
+    
+    for i in range(N):
+        for j in range(K):
+                Phi[i,j] =  math.comb(K,j) * x[i]**j * (1-x[i])**(K-j)
+            
+    for i in range(Phi.shape[1]):
+        Phi[:,i] = Phi[:,i] - np.mean(Phi[:,i])
+    return(Phi.dot(c))
+
+@jit
+def optimal_transformation(x_initial,y,K=3):
+    a = np.min(x_initial)
+    b = np.max(x_initial)
+    x = (x_initial - a) / (b-a)
+    N = len(x_initial)
+    
+    Phi = np.zeros((N,K))
+    for i in range(N):
+        for j in range(K):
+            Phi[i,j] =  math.comb(K,j) * x[i]**j * (1-x[i])**(K-j)
+            
+    for i in range(Phi.shape[1]):
+        Phi[:,i] = Phi[:,i] - np.mean(Phi[:,i])
+        
+    z = Phi.T.dot(y)
+    zbar = z - Phi.T.dot([np.mean(y)] * len(y))
+    
+    Phi2 = Phi.T.dot(Phi)
+    if np.linalg.matrix_rank(Phi2) < Phi2.shape[0]:
+        Phi2 = Phi2 * np.random.normal(1,0.001,Phi2.shape[0]*Phi2.shape[1]).reshape(Phi2.shape[0],Phi2.shape[1])
+
+    A = np.linalg.inv(Phi2/(Phi.shape[0]-1))
+    Apr = A.dot(zbar)
+    num_temp = z.T.dot(Apr)
+    c  = Apr.copy()
+    if num_temp > 0:
+        c = c / np.sqrt(num_temp)
+    return((c,a,b))
