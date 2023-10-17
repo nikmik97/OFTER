@@ -1,0 +1,62 @@
+def residualise(y,train_proportion=0.7,p_value=0.01,max_order = 5,alpha=0.001,nlags=30): 
+ 
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore") 
+        train_y = y[:int(np.floor(train_proportion * y.shape[0]))]
+        found_order = find_order(train_y,p_value=p_value,max_order = max_order,alpha=alpha,nlags=nlags)
+    
+    mod = sm.tsa.statespace.SARIMAX(train_y,order = found_order)
+    res = mod.fit()
+    rr = res.summary().tables[1].data
+    if len(rr) > 1: 
+        maps = {}
+        for i in range(1,len(rr)):
+            maps[str(rr[i][0])] = float(str(rr[i][1]))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore") 
+            mod = sm.tsa.statespace.SARIMAX(y,order = found_order)
+            with mod.fix_params(maps):
+                res=mod.fit()
+        
+        residuals = res.resid
+    else: 
+        residuals = np.zeros(y.shape[0])
+    
+    return(y - residuals,residuals,found_order,maps)
+
+def find_order(y,p_value=0.001,max_order = 5,alpha=0.001,nlags=30):
+        p,r,q = [0,0,0]
+        
+        # Set r equal to the number of times differencing is required 
+        # for train_y to become stationary
+        ytemp = y.copy()
+        while adfuller(y)[1] > p_value: 
+            ytemp[1:] = ytemp[1:] - ytemp[:-1]
+            r += 1
+        
+        # find the p,q terms that minimize AIC based on a grid search 
+        val_pacf,conf_pacf = pacf(y,nlags=nlags,alpha=alpha)
+        val_acf,conf_acf = acf(y,nlags=nlags,alpha=alpha,fft=False)
+        signs_acf = np.sign(conf_acf[1:,0] * conf_acf[1:,1])
+        signs_pacf = np.sign(conf_pacf[1:,0] * conf_pacf[1:,1])
+        ind_acf = np.where(signs_acf == 1)[0]
+        ind_pacf = np.where(signs_pacf == 1)[0]
+
+        mi = int(max_order+1)
+        if len(ind_acf)*len(ind_pacf) > 0:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore") 
+                bics = np.full((mi,mi),1000000)
+                for p in range(mi): 
+                    for q in range(mi-p): 
+                        mod = sm.tsa.statespace.SARIMAX(y,order = (p,0,q))
+                        res = mod.fit()
+                        bics[p,q] = res.bic
+                p = np.where(bics == bics.min())[0][0] 
+                q = np.where(bics == bics.min())[1][0] 
+        if len(ind_acf) > 0 and len(ind_pacf) == 0: 
+            q = ind_acf[-1] + 1
+        if len(ind_pacf) > 0 and len(ind_acf) == 0: 
+            p = ind_pacf[-1] + 1
+        return(p,r,q)
